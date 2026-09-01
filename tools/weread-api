@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# weread-api — thin wrapper around the WeRead agent API gateway.
+#
+#   weread-api <api_name> [json-params] [cache-name]
+#
+# Prints the raw JSON response on stdout. Never exits non-zero for API or
+# auth problems; they are reported as {"errcode": ..., "errmsg": ...} so the
+# caller (QML) can parse one shape. When cache-name is given and the response
+# has errcode 0, it is also written to
+# ${XDG_STATE_HOME:-~/.local/state}/omarchy/weread/<cache-name>.json.
+set -u
+
+API_NAME="${1:-}"
+PARAMS="${2:-{}}"
+CACHE_NAME="${3:-}"
+SKILL_VERSION="1.0.4"
+GATEWAY="https://i.weread.qq.com/api/agent/gateway"
+
+fail() { # errcode errmsg
+  jq -nc --argjson c "$1" --arg m "$2" '{errcode:$c, errmsg:$m}'
+  exit 0
+}
+
+[[ -n "$API_NAME" ]] || fail 4000 "usage: weread-api <api_name> [json-params] [cache-name]"
+
+KEY="${WEREAD_API_KEY:-}"
+if [[ -z "$KEY" ]]; then
+  KEY_FILE="$HOME/.config/omarchy/weread/api-key"
+  [[ -f "$KEY_FILE" ]] && KEY="$(tr -d '[:space:]' <"$KEY_FILE")"
+fi
+[[ -n "$KEY" ]] || fail 4010 "未配置 WEREAD_API_KEY"
+
+BODY="$(jq -nc --arg api "$API_NAME" --arg v "$SKILL_VERSION" --argjson p "$PARAMS" \
+  '{api_name: $api, skill_version: $v} + $p' 2>/dev/null)" || fail 4001 "参数不是合法 JSON"
+
+RESP="$(curl -sS --max-time 15 -X POST "$GATEWAY" \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "$BODY" 2>/dev/null)" || fail 4020 "网络请求失败，请稍后再试"
+
+[[ -n "$RESP" ]] || fail 4021 "服务无响应，请稍后再试"
+jq -e . >/dev/null 2>&1 <<<"$RESP" || fail 4022 "服务返回异常"
+
+if [[ -n "$CACHE_NAME" ]] && [[ "$(jq -r '.errcode // 0' <<<"$RESP")" == "0" ]]; then
+  STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/weread"
+  mkdir -p "$STATE_DIR"
+  printf '%s' "$RESP" >"$STATE_DIR/$CACHE_NAME.json"
+fi
+
+printf '%s' "$RESP"

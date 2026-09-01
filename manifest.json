@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "luotao.weread",
+  "name": "WeRead",
+  "version": "0.1.0",
+  "author": "Luo Tao <luotao@hey.com>",
+  "license": "MIT",
+  "description": "微信读书 for the Omarchy bar: this week's reading time at a glance, daily bars and the books you actually spent time on — powered by the WeRead agent API.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "WeRead",
+    "description": "微信读书 reading stats: weekly time, daily bars and top books.",
+    "category": "Reading",
+    "aliases": [
+      "weread",
+      "wechat reading",
+      "微信读书",
+      "reading",
+      "books",
+      "book",
+      "读书"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshMinutes": 15
+    },
+    "schema": [
+      {
+        "key": "refreshMinutes",
+        "type": "integer",
+        "label": "Refresh interval (minutes)",
+        "min": 5,
+        "max": 120,
+        "step": 5,
+        "defaultValue": 15
+      }
+    ]
+  }
+}
