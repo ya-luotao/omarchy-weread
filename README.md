@@ -37,6 +37,16 @@ export WEREAD_API_KEY=wrk-xxxxxxxx
 omarchy plugin add https://github.com/ya-luotao/omarchy-weread.git --enable
 ```
 
+Dependencies: `curl` and `jq` (both preinstalled on Omarchy).
+
+## Uninstall
+
+```bash
+omarchy plugin remove luotao.weread
+# optionally remove cached data and the key file:
+rm -rf ~/.local/state/omarchy/weread ~/.config/omarchy/weread
+```
+
 ## Usage
 
 - Left-click the book → panel
