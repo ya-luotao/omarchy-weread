@@ -2,6 +2,10 @@
 
 微信读书 reading stats as a native [Omarchy](https://omarchy.org) shell plugin (Omarchy 4 "Quattro" or later), powered by the official [WeRead agent API](https://github.com/Tencent/WeChatReading).
 
+<p align="center">
+  <img src="screenshots/panel.png" alt="WeRead panel: week stats, reading progress, popular highlight" width="60%" />
+</p>
+
 - **Bar widget** — an open-book glyph in the bar. A dot on the spine appears once you've read today; the tooltip carries 今天 / 本周 time and your consecutive-days streak.
 - **Four period views** — 本周 / 本月 / 今年 / 总计 (keys `1`–`4`), each with a bar chart at matching granularity: days, days, months, years. Week-over-week trend, friend ranking, and preference words (偏好夜间阅读 …) ride along when the API offers them.
 - **正在读** — progress bars for the three most recently read books on your shelf.
