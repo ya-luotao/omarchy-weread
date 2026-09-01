@@ -5,42 +5,66 @@ import qs.Commons
 import qs.Ui
 import "WeReadModel.js" as Model
 
-// WeRead bar widget: an open-book glyph in the bar carrying this week's
-// reading life. Click for the panel — daily bars and the books the time
-// actually went to. Data comes from the WeRead agent API via tools/weread-api;
-// the last good response is cached on disk so the bar never starts blank.
+// WeRead bar widget: an open-book glyph in the bar carrying your reading
+// life. Click for the panel — four period views (week / month / year / all
+// time) with matching bar charts, the books currently in progress, a popular
+// highlight to sit with, and the lifetime numbers. Data comes from the
+// WeRead agent API via tools/weread-sync; the last good bundle is cached on
+// disk so the bar never starts blank.
 Panel {
   id: root
   moduleName: "luotao.weread"
   ipcTarget: "luotao.weread"
   manageIpc: false
 
-  readonly property string toolPath: String(Qt.resolvedUrl("tools/weread-api")).replace(/^file:\/\//, "")
+  readonly property string toolPath: String(Qt.resolvedUrl("tools/weread-sync")).replace(/^file:\/\//, "")
   readonly property string cachePath: Quickshell.env("XDG_STATE_HOME") !== ""
-    ? Quickshell.env("XDG_STATE_HOME") + "/omarchy/weread/weekly.json"
-    : Quickshell.env("HOME") + "/.local/state/omarchy/weread/weekly.json"
+    ? Quickshell.env("XDG_STATE_HOME") + "/omarchy/weread/bundle.json"
+    : Quickshell.env("HOME") + "/.local/state/omarchy/weread/bundle.json"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(foreground, 1.55)
 
-  property var week: Model.emptyWeek()
-  property bool fetching: false
+  property var bundle: Model.emptyBundle()
   property int lastFetchMs: 0
+  property var quotePick: null
 
-  readonly property string tooltip: week.ok
-    ? "微信读书 · 今天 " + Model.fmtShort(week.todaySeconds) + " · 本周 " + Model.fmtShort(week.totalReadTime)
-    : (week.errmsg !== "" ? "微信读书 — " + week.errmsg : "微信读书")
+  property string period: String(setting("defaultPeriod", "weekly"))
+  readonly property var view: Model.periodView(bundle, period)
+  readonly property int streak: bundle.ok ? Model.streakDays(bundle) : 0
+  readonly property int todaySeconds: bundle.ok ? Model.todaySeconds(bundle) : 0
+
+  readonly property string tooltip: bundle.ok
+    ? "微信读书 · 今天 " + Model.fmtShort(todaySeconds) + " · 本周 " +
+      Model.fmtShort(Model.periodView(bundle, "weekly").totalReadTime) +
+      (streak > 0 ? " · 连续" + streak + "天" : "")
+    : (bundle.errmsg !== "" ? "微信读书 — " + bundle.errmsg : "微信读书")
 
   function refresh() {
-    if (fetchProc.running) return
-    fetchProc.running = true
+    if (!fetchProc.running) fetchProc.running = true
   }
 
-  // Fresh data when it is actually looked at; the cache fills the gap.
+  function choosePeriod(key) {
+    period = key
+    var entry = { id: root.moduleName }
+    for (var k in root.settings) if (k !== "id") entry[k] = root.settings[k]
+    entry.defaultPeriod = key
+    root.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  function pickQuote() {
+    var items = bundle.quotes.items
+    quotePick = items && items.length > 0
+      ? items[Math.floor(Math.random() * items.length)] : null
+  }
+
   onOpenedChanged: {
     if (opened) {
       cacheFile.reload()
+      pickQuote()
       if (Date.now() - lastFetchMs > 5 * 60 * 1000) refresh()
     }
   }
@@ -53,24 +77,24 @@ Panel {
     watchChanges: true
     printErrors: false
     onLoaded: {
-      var w = Model.parseWeekly(text())
-      if (w.ok) root.week = w
+      var b = Model.parseBundle(text())
+      if (b.ok || b.errcode !== -1) root.bundle = b
     }
     onFileChanged: reload()
   }
 
   Process {
     id: fetchProc
-    command: [root.toolPath, "/readdata/detail", '{"mode":"weekly"}', "weekly"]
+    command: [root.toolPath]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         root.lastFetchMs = Date.now()
-        var w = Model.parseWeekly(text)
-        if (w.ok || w.errcode !== -1) root.week = w // keep cache over a local parse failure
+        var b = Model.parseBundle(text)
+        if (b.ok || b.errcode !== -1) root.bundle = b
       }
     }
-    onExited: function(exitCode) { root.lastFetchMs = Date.now() }
+    onExited: root.lastFetchMs = Date.now()
   }
 
   Timer {
@@ -91,11 +115,13 @@ Panel {
     function refresh(): string { root.refresh(); return "ok" }
     function status(): string {
       return JSON.stringify({
-        ok: root.week.ok,
-        todaySeconds: root.week.todaySeconds,
-        weekSeconds: root.week.totalReadTime,
-        weekDays: root.week.readDays,
-        topBook: root.week.books.length > 0 ? root.week.books[0].title : null
+        ok: root.bundle.ok,
+        todaySeconds: root.todaySeconds,
+        streakDays: root.streak,
+        weekSeconds: Model.periodView(root.bundle, "weekly").totalReadTime,
+        shelfCount: root.bundle.shelf ? root.bundle.shelf.total : 0,
+        noteCount: root.bundle.notes ? root.bundle.notes.totalCount : 0,
+        reading: root.bundle.reading.map(function(b) { return { title: b.title, progress: b.progress } })
       })
     }
   }
@@ -111,15 +137,15 @@ Panel {
 
     iconComponent: Component {
       Item {
-        // An open book: two pages falling away from the spine. The spine
-        // fills in accent once reading has happened today.
+        // An open book: two pages falling away from the spine. A dot on the
+        // spine once reading has happened today.
         Canvas {
           anchors.centerIn: parent
           width: Style.space(14)
           height: Style.space(14)
 
           readonly property color stroke: root.barForeground
-          readonly property bool readToday: root.week.ok && root.week.todaySeconds > 0
+          readonly property bool readToday: root.bundle.ok && root.todaySeconds > 0
           onStrokeChanged: requestPaint()
           onReadTodayChanged: requestPaint()
 
@@ -168,8 +194,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(300))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(440))
+    contentWidth: panel.fittedContentWidth(Style.space(320))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -178,7 +204,10 @@ Panel {
       onCloseRequested: root.close()
       onTextKey: function(text) {
         var k = String(text || "").toLowerCase()
-        if (k === "r") root.refresh()
+        var keys = Model.PERIOD_KEYS
+        var idx = ["1", "2", "3", "4"].indexOf(k)
+        if (idx !== -1) root.choosePeriod(keys[idx])
+        else if (k === "r") root.refresh()
       }
 
       Column {
@@ -189,70 +218,86 @@ Panel {
         PanelHero {
           width: parent.width
           title: "微信读书"
-          meta: root.fetching && !root.week.ok ? "加载中…" : Model.weekSummary(root.week)
+          meta: !root.bundle.ok
+            ? (fetchProc.running ? "加载中…" : (root.bundle.errmsg || "暂无数据"))
+            : Model.periodSummary(root.view) + (root.streak > 1 ? " · 连续" + root.streak + "天" : "")
           foreground: root.foreground
           fontFamily: root.fontFamily
         }
 
-        // Setup hint when the API key is missing — the one thing the user
-        // has to do before any of this works.
-        Column {
+        // Setup hint when the API key is missing.
+        Text {
+          width: parent.width
+          visible: root.bundle.errcode === 4010
+          text: "获取 API Key：weread.qq.com/r/weread-skills\n然后任选其一：\n· export WEREAD_API_KEY=wrk-…\n· 写入 ~/.config/omarchy/weread/api-key"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        // Period tabs.
+        Flow {
           width: parent.width
           spacing: Style.space(6)
-          visible: root.week.errcode === 4010
+          visible: root.bundle.ok
 
-          Text {
-            width: parent.width
-            text: "获取 API Key：weread.qq.com/r/weread-skills\n然后任选其一：\n· export WEREAD_API_KEY=wrk-…\n· 写入 ~/.config/omarchy/weread/api-key"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
+          Repeater {
+            model: Model.PERIOD_KEYS
+
+            Button {
+              required property string modelData
+              text: Model.PERIOD_TITLES[modelData]
+              bordered: true
+              selected: root.period === modelData
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.choosePeriod(modelData)
+            }
           }
         }
 
-        // The week at a glance: seven small bars, today in accent.
+        // Friend ranking, current week only.
+        Text {
+          width: parent.width
+          visible: root.period === "weekly" && !!root.view.rank
+          text: root.view.rank || ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        // The period at a glance: bars whose granularity matches the tab —
+        // days for week and month, months for year, years for all time.
         Column {
-          id: weekView
+          id: chart
           width: parent.width
           spacing: Style.space(4)
-          visible: root.week.ok
-
-          readonly property int weekMax: {
-            var max = 0
-            for (var i = 0; i < root.week.days.length; i++)
-              max = Math.max(max, root.week.days[i].seconds)
-            return max
-          }
-
-          Text {
-            text: "本周 · " + Model.fmtDuration(root.week.totalReadTime)
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
+          visible: root.view.ok && root.view.series.length > 0
 
           Row {
             width: parent.width
-            spacing: Style.space(6)
+            spacing: root.view.series.length > 20 ? Style.space(1) : Style.space(3)
 
             Repeater {
-              model: root.week.days
+              model: root.view.series
 
               Column {
                 required property var modelData
-                readonly property real share: weekView.weekMax > 0
-                  ? modelData.seconds / weekView.weekMax : 0
+                readonly property real share: root.view.seriesMax > 0
+                  ? modelData.seconds / root.view.seriesMax : 0
+                width: (parent.width - parent.spacing * (root.view.series.length - 1)) / root.view.series.length
                 spacing: Style.space(3)
 
                 Item {
-                  width: Style.space(18)
+                  width: parent.width
                   height: Style.space(34)
 
                   Rectangle {
                     anchors.bottom: parent.bottom
                     anchors.horizontalCenter: parent.horizontalCenter
-                    width: Style.space(10)
+                    width: Math.max(Style.space(2), parent.width * 0.6)
                     height: Math.max(Style.space(2), Math.round(parent.height * share))
                     radius: Style.space(2)
                     color: modelData.isToday ? Color.accent : root.foreground
@@ -264,6 +309,7 @@ Panel {
 
                 Text {
                   anchors.horizontalCenter: parent.horizontalCenter
+                  visible: text !== ""
                   text: modelData.label
                   color: modelData.isToday ? root.foreground : root.dim
                   font.family: root.fontFamily
@@ -274,11 +320,84 @@ Panel {
           }
         }
 
-        // Where the time went: this week's most-read books.
+        Text {
+          width: parent.width
+          visible: root.view.preferLine !== ""
+          text: root.view.preferLine
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        // Currently reading: progress bars for the shelf's most recent books.
         Column {
           width: parent.width
           spacing: Style.space(6)
-          visible: root.week.ok && root.week.books.length > 0
+          visible: root.bundle.reading.length > 0
+
+          Text {
+            text: "正在读"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Repeater {
+            model: root.bundle.reading
+
+            Column {
+              required property var modelData
+              width: parent.width
+              spacing: Style.space(2)
+
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  id: bookTitle
+                  width: parent.width - pct.implicitWidth - parent.spacing
+                  text: modelData.title + (modelData.author !== "" ? " · " + modelData.author : "")
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  id: pct
+                  text: modelData.progress + "%"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+              }
+
+              Rectangle {
+                width: parent.width
+                height: Style.space(3)
+                radius: Style.space(1.5)
+                color: root.foreground
+                opacity: 0.15
+
+                Rectangle {
+                  width: Math.max(Style.space(3), parent.width * Math.min(100, modelData.progress) / 100)
+                  height: parent.height
+                  radius: parent.radius
+                  color: Color.accent
+                  opacity: 0.9
+                }
+              }
+            }
+          }
+        }
+
+        // Where the time went in this period.
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.view.books.length > 0
 
           Text {
             text: "读得最多"
@@ -288,7 +407,7 @@ Panel {
           }
 
           Repeater {
-            model: root.week.books
+            model: root.view.books.slice(0, 3)
 
             Row {
               required property var modelData
@@ -324,9 +443,70 @@ Panel {
           }
         }
 
+        // A popular highlight from the book at the top of the week —
+        // re-rolled every time the panel opens.
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+          visible: root.quotePick !== null
+
+          Text {
+            text: "热门划线" + (root.bundle.quotes.bookTitle !== "" ? " · 《" + root.bundle.quotes.bookTitle + "》" : "")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            width: parent.width
+            text: root.quotePick ? "“" + root.quotePick.text + "”" : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            visible: root.quotePick && root.quotePick.count > 0
+            text: root.quotePick ? root.quotePick.count + " 人划过这句" : ""
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
+
+        // Lifetime numbers + shelf and notes footprint.
         Text {
           width: parent.width
-          text: "R 刷新 · 中键刷新 · Esc 关闭"
+          visible: root.period === "overall" && root.view.readStat.length > 0
+          text: root.view.readStat.map(function(s) { return s.stat + " " + s.counts }).join(" · ")
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        Text {
+          width: parent.width
+          visible: root.bundle.ok
+          text: {
+            var parts = []
+            if (root.bundle.shelf) parts.push("书架 " + root.bundle.shelf.total)
+            if (root.bundle.notes && root.bundle.notes.totalCount > 0)
+              parts.push("笔记 " + root.bundle.notes.totalCount + "条")
+            if (root.bundle.recommend.length > 0)
+              parts.push("推荐《" + root.bundle.recommend[0].title + "》")
+            return parts.join(" · ")
+          }
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        Text {
+          width: parent.width
+          text: "1-4 周期 · R 刷新 · Esc 关闭"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall

@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# weread-sync — one-shot bundle fetch for the WeRead bar widget.
+#
+# Calls the WeRead agent gateway in parallel and assembles a single JSON
+# document on stdout (and at $XDG_STATE_HOME/omarchy/weread/bundle.json):
+#
+#   { fetchedAt, ok, periods: { weekly, monthly, annually, overall },
+#     shelf, notes, reading[], quotes[], recommend[] }
+#
+# Individual API failures degrade to per-section errors instead of failing
+# the whole bundle. Requires WEREAD_API_KEY or ~/.config/omarchy/weread/api-key.
+set -u
+
+SKILL_VERSION="1.0.4"
+GATEWAY="https://i.weread.qq.com/api/agent/gateway"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/weread"
+BUNDLE="$STATE_DIR/bundle.json"
+
+die() { jq -nc --argjson c "$1" --arg m "$2" '{ok:false, errcode:$c, errmsg:$m}'; exit 0; }
+
+KEY="${WEREAD_API_KEY:-}"
+if [[ -z "$KEY" ]]; then
+  KEY_FILE="$HOME/.config/omarchy/weread/api-key"
+  [[ -f "$KEY_FILE" ]] && KEY="$(tr -d '[:space:]' <"$KEY_FILE")"
+fi
+[[ -n "$KEY" ]] || die 4010 "未配置 WEREAD_API_KEY"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+call() { # api_name params_json outfile
+  local body resp
+  body="$(jq -nc --arg api "$1" --arg v "$SKILL_VERSION" --argjson p "$2" \
+    '{api_name: $api, skill_version: $v} + $p' 2>/dev/null)" \
+    || { echo '{"errcode":4001,"errmsg":"bad params"}' >"$3"; return; }
+  resp="$(curl -sS --max-time 20 -X POST "$GATEWAY" \
+    -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+    -d "$body" 2>/dev/null)"
+  if [[ -n "$resp" ]] && jq -e . >/dev/null 2>&1 <<<"$resp"; then
+    printf '%s' "$resp" >"$3"
+  else
+    echo '{"errcode":4020,"errmsg":"网络请求失败"}' >"$3"
+  fi
+}
+
+PREV_MONTH_TS="$(date -d "$(date +%Y-%m-01) -1 day" +%s)"
+
+# Round 1: independent calls in parallel.
+call /readdata/detail '{"mode":"weekly"}'    "$TMP/weekly.json" &
+call /readdata/detail '{"mode":"monthly"}'   "$TMP/monthly.json" &
+call /readdata/detail '{"mode":"annually"}'  "$TMP/annually.json" &
+call /readdata/detail '{"mode":"overall"}'   "$TMP/overall.json" &
+call /readdata/detail "{\"mode\":\"monthly\",\"baseTime\":$PREV_MONTH_TS}" "$TMP/prev_month.json" &
+call /shelf/sync       '{}'                  "$TMP/shelf.json" &
+call /user/notebooks   '{"count":100}'       "$TMP/notes.json" &
+call /book/recommend   '{"count":6}'         "$TMP/recommend.json" &
+wait
+
+# Round 2: dependent calls.
+# Progress for the 3 most recently read, unfinished ebooks on the shelf.
+mapfile -t BIDS < <(jq -r '
+  [ .books // [] | map(select((.finishReading // 0) != 1))
+    | sort_by(.readUpdateTime // 0) | reverse | .[0:3][].bookId ] | .[]
+' "$TMP/shelf.json" 2>/dev/null)
+for bid in "${BIDS[@]:-}"; do
+  [[ -n "$bid" ]] && call /book/getprogress "$(jq -nc --arg b "$bid" '{bookId: $b}')" "$TMP/prog_$bid.json" &
+done
+
+# Popular highlights of this week's most-read book (fallback: month's,
+# then the most recently read book on the shelf).
+TOPBID="$(jq -r '.readLongest[0].book.bookId // empty' "$TMP/weekly.json" 2>/dev/null)"
+[[ -z "$TOPBID" ]] && TOPBID="$(jq -r '.readLongest[0].book.bookId // empty' "$TMP/monthly.json" 2>/dev/null)"
+[[ -z "$TOPBID" ]] && TOPBID="${BIDS[0]:-}"
+if [[ -n "$TOPBID" ]]; then
+  call /book/bestbookmarks "$(jq -nc --arg b "$TOPBID" '{bookId: $b}')" "$TMP/quote.json" &
+fi
+wait
+
+[[ -f "$TMP/quote.json" ]] || echo '{}' >"$TMP/quote.json"
+jq -s '.' "$TMP"/prog_*.json >"$TMP/progress.json" 2>/dev/null || echo '[]' >"$TMP/progress.json"
+
+jq -n \
+  --slurpfile w   "$TMP/weekly.json" \
+  --slurpfile m   "$TMP/monthly.json" \
+  --slurpfile mp  "$TMP/prev_month.json" \
+  --slurpfile a   "$TMP/annually.json" \
+  --slurpfile o   "$TMP/overall.json" \
+  --slurpfile s   "$TMP/shelf.json" \
+  --slurpfile n   "$TMP/notes.json" \
+  --slurpfile r   "$TMP/recommend.json" \
+  --slurpfile p   "$TMP/progress.json" \
+  --slurpfile q   "${TMP}/quote.json" \
+  --argjson now "$(date +%s)" '
+  $w[0] as $w | $m[0] as $m | $a[0] as $a | $o[0] as $o
+  | $s[0] as $s | $n[0] as $n | $r[0] as $r | $p[0] as $p | ($q[0] // {}) as $q
+  | $mp[0] as $mp |
+  def longest:
+    [ (.readLongest // [])[0:5][]
+      | { title:   (.book.title // .albumInfo.title // ""),
+          author:  (.book.author // (if .albumInfo then "有声书" else "" end)),
+          readTime: (.readTime // 0),
+          bookId:   (.book.bookId // null) } ]
+    | map(select(.title != ""));
+  def period($rank):
+    { errcode: (.errcode // 0),
+      totalReadTime: (.totalReadTime // 0),
+      readDays: (.readDays // 0),
+      dayAverage: (.dayAverageReadTime // 0),
+      compare: (.compare // null),
+      readTimes: (.readTimes // {}),
+      baseTime: (.baseTime // 0),
+      preferTimeWord: (.preferTimeWord // null),
+      preferCategoryWord: (.preferCategoryWord // null),
+      rank: $rank,
+      books: longest };
+  {
+    fetchedAt: $now,
+    ok: (($w.errcode // 0) == 0),
+    periods: {
+      weekly:   ($w | period($w.rank.text // null)),
+      monthly:  ($m | period(null)),
+      annually: ($a | period(null)) + { dailyReadTimes: ($a.dailyReadTimes // {}) },
+      overall:  ($o | period(null)) + {
+                  readStat: [ ($o.readStat // [])[] | { stat, counts } ],
+                  registTime: ($o.registTime // null) },
+      monthlyPrev: { errcode: ($mp.errcode // 0),
+                     baseTime: ($mp.baseTime // 0),
+                     readTimes: ($mp.readTimes // {}) }
+    },
+    shelf: {
+      errcode: ($s.errcode // 0),
+      ebooks: ($s.books // [] | length),
+      albums: ($s.albums // [] | length),
+      mp: (if ($s.mp // null) == null then 0 else 1 end)
+    } + { total: (($s.books // [] | length) + ($s.albums // [] | length)
+                  + (if ($s.mp // null) == null then 0 else 1 end)) },
+    notes: {
+      errcode: ($n.errcode // 0),
+      bookCount: ($n.totalBookCount // 0),
+      totalCount: ($n.totalNoteCount // 0)
+    },
+    reading: [ $p[]
+      | . as $pg
+      | ($s.books // [] | map(select(.bookId == $pg.bookId)) | .[0]) as $sb
+      | select($sb != null and ($pg.errcode // 0) == 0)
+      | { bookId: $pg.bookId,
+          title: ($sb.title // ""),
+          author: ($sb.author // ""),
+          progress: ($pg.book.progress // 0),
+          totalTime: (if ($pg.book.recordReadingTime // 0) > 0
+                      then $pg.book.recordReadingTime
+                      else ($pg.book.readingTime // 0) end),
+          updateTime: ($pg.book.updateTime // 0) } ],
+    quotes: {
+      bookTitle: ($w.readLongest[0].book.title // $m.readLongest[0].book.title
+                  // ($s.books // [] | map(select(.bookId == ($p[0].bookId // ""))) | .[0].title // "")),
+      items: [ ($q.items // [])[0:8][]
+               | { text: (.markText // ""), count: (.totalCount // 0) }
+               | select(.text | length > 0) ]
+    },
+    recommend: [ ($r.books // [])[0:3][]
+      | { title: (.title // ""), author: (.author // ""),
+          reason: (.reason // ""), rating: (.newRating // 0),
+          ratingTitle: (.newRatingDetail.title // "") } ]
+  }
+' | tee "$BUNDLE"

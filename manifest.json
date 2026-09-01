@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "luotao.weread",
   "name": "WeRead",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Luo Tao <luotao@hey.com>",
   "license": "MIT",
   "description": "微信读书 for the Omarchy bar: this week's reading time at a glance, daily bars and the books you actually spent time on — powered by the WeRead agent API.",
@@ -29,7 +29,8 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshMinutes": 15
+      "refreshMinutes": 15,
+      "defaultPeriod": "weekly"
     },
     "schema": [
       {
@@ -40,6 +41,12 @@
         "max": 120,
         "step": 5,
         "defaultValue": 15
+      },
+      {
+        "key": "defaultPeriod",
+        "type": "string",
+        "label": "Default period tab (weekly, monthly, annually, overall)",
+        "defaultValue": "weekly"
       }
     ]
   }
