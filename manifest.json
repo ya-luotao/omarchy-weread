@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "luotao.weread",
   "name": "WeRead",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Luo Tao <luotao@hey.com>",
   "license": "MIT",
   "description": "微信读书 for the Omarchy bar: this week's reading time at a glance, daily bars and the books you actually spent time on — powered by the WeRead agent API.",

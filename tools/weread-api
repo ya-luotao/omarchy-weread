@@ -9,12 +9,14 @@
 # has errcode 0, it is also written to
 # ${XDG_STATE_HOME:-~/.local/state}/omarchy/weread/<cache-name>.json.
 set -u
+umask 077  # cache files carry private reading history
 
 API_NAME="${1:-}"
 if [[ $# -ge 2 ]]; then PARAMS="$2"; else PARAMS="{}"; fi
 CACHE_NAME="${3:-}"
 SKILL_VERSION="1.0.4"
 GATEWAY="https://i.weread.qq.com/api/agent/gateway"
+MAX_RESP_BYTES=5242880  # responses are buffered whole in the shell and in QML
 
 fail() { # errcode errmsg
   jq -nc --argjson c "$1" --arg m "$2" '{errcode:$c, errmsg:$m}'
@@ -33,7 +35,7 @@ fi
 BODY="$(jq -nc --arg api "$API_NAME" --arg v "$SKILL_VERSION" --argjson p "$PARAMS" \
   '{api_name: $api, skill_version: $v} + $p' 2>/dev/null)" || fail 4001 "参数不是合法 JSON"
 
-RESP="$(curl -sS --max-time 15 -X POST "$GATEWAY" \
+RESP="$(curl -sS --max-time 15 --max-filesize "$MAX_RESP_BYTES" -X POST "$GATEWAY" \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d "$BODY" 2>/dev/null)" || fail 4020 "网络请求失败，请稍后再试"
@@ -43,8 +45,10 @@ jq -e . >/dev/null 2>&1 <<<"$RESP" || fail 4022 "服务返回异常"
 
 if [[ -n "$CACHE_NAME" ]] && [[ "$(jq -r '.errcode // 0' <<<"$RESP")" == "0" ]]; then
   STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/weread"
-  mkdir -p "$STATE_DIR"
-  printf '%s' "$RESP" >"$STATE_DIR/$CACHE_NAME.json"
+  mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
+  CACHE_TMP="$(mktemp "$STATE_DIR/.$CACHE_NAME.XXXXXX")" \
+    && printf '%s' "$RESP" >"$CACHE_TMP" \
+    && mv -f "$CACHE_TMP" "$STATE_DIR/$CACHE_NAME.json"
 fi
 
 printf '%s' "$RESP"

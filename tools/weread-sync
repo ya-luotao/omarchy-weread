@@ -10,11 +10,13 @@
 # Individual API failures degrade to per-section errors instead of failing
 # the whole bundle. Requires WEREAD_API_KEY or ~/.config/omarchy/weread/api-key.
 set -u
+umask 077  # the bundle carries private reading history
 
 SKILL_VERSION="1.0.4"
 GATEWAY="https://i.weread.qq.com/api/agent/gateway"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/weread"
 BUNDLE="$STATE_DIR/bundle.json"
+MAX_RESP_BYTES=5242880  # responses are buffered whole in the shell and in QML
 
 die() { jq -nc --argjson c "$1" --arg m "$2" '{ok:false, errcode:$c, errmsg:$m}'; exit 0; }
 
@@ -26,14 +28,15 @@ fi
 [[ -n "$KEY" ]] || die 4010 "未配置 WEREAD_API_KEY"
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" ${BUNDLE_TMP:+"$BUNDLE_TMP"}' EXIT
+mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
 
 call() { # api_name params_json outfile
   local body resp
   body="$(jq -nc --arg api "$1" --arg v "$SKILL_VERSION" --argjson p "$2" \
     '{api_name: $api, skill_version: $v} + $p' 2>/dev/null)" \
     || { echo '{"errcode":4001,"errmsg":"bad params"}' >"$3"; return; }
-  resp="$(curl -sS --max-time 20 -X POST "$GATEWAY" \
+  resp="$(curl -sS --max-time 20 --max-filesize "$MAX_RESP_BYTES" -X POST "$GATEWAY" \
     -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
     -d "$body" 2>/dev/null)"
   if [[ -n "$resp" ]] && jq -e . >/dev/null 2>&1 <<<"$resp"; then
@@ -75,6 +78,9 @@ if [[ -n "$TOPBID" ]]; then
   call /book/bestbookmarks "$(jq -nc --arg b "$TOPBID" '{bookId: $b}')" "$TMP/quote.json" &
 fi
 wait
+
+# Cache is best-effort: an unwritable state dir must not cost us the bundle.
+BUNDLE_TMP="$(mktemp "$STATE_DIR/.bundle.XXXXXX" 2>/dev/null)" || BUNDLE_TMP="$TMP/bundle.json"
 
 [[ -f "$TMP/quote.json" ]] || echo '{}' >"$TMP/quote.json"
 jq -s '.' "$TMP"/prog_*.json >"$TMP/progress.json" 2>/dev/null || echo '[]' >"$TMP/progress.json"
@@ -163,4 +169,6 @@ jq -n \
           reason: (.reason // ""), rating: (.newRating // 0),
           ratingTitle: (.newRatingDetail.title // "") } ]
   }
-' | tee "$BUNDLE"
+' >"$BUNDLE_TMP"
+mv -f "$BUNDLE_TMP" "$BUNDLE" 2>/dev/null || BUNDLE="$BUNDLE_TMP"
+cat "$BUNDLE"
